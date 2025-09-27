@@ -589,4 +589,5 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
+    # special_tokens 需要被单独处理
     raise NotImplementedError
