@@ -138,8 +138,13 @@ class Snapshot:
         # Load the snapshot
         with open(snapshot_path, "rb") as f:
             expected_data = pickle.load(f)
-
+        
         if isinstance(actual, dict):
+            with open('test.log', 'w') as f:
+                f.write(f'expect values : \n {expected_data['vocab_values']} \n')
+                f.write(f'actual values : \n {actual['vocab_values']} \n')
+                f.write(f'expect merges : \n {expected_data['merges']} \n')
+                f.write(f'actual mergss : \n {actual['merges']} \n')
             for key in actual:
                 if key not in expected_data:
                     raise AssertionError(f"Key '{key}' not found in snapshot for {test_name}")

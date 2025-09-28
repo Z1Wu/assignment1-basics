@@ -1,8 +1,8 @@
 import json
 import time
 
-from .adapters import run_train_bpe
-from .common import FIXTURES_PATH, gpt2_bytes_to_unicode
+from tests.adapters import run_train_bpe
+from tests.common import FIXTURES_PATH, gpt2_bytes_to_unicode
 
 
 def test_train_bpe_speed():
@@ -86,3 +86,9 @@ def test_train_bpe_special_tokens(snapshot):
             "merges": merges,
         },
     )
+
+if __name__ == "__main__":
+    # test_train_bpe_special_tokens()
+    from tests.conftest import Snapshot
+    snapshot_handler = Snapshot(default_force_update=True, default_test_name="test_train_bpe_special_tokens")
+    test_train_bpe_special_tokens(snapshot_handler)
