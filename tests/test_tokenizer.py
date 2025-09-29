@@ -9,8 +9,8 @@ import psutil
 import pytest
 import tiktoken
 
-from .adapters import get_tokenizer
-from .common import FIXTURES_PATH, gpt2_bytes_to_unicode
+from tests.adapters import get_tokenizer
+from tests.common import FIXTURES_PATH, gpt2_bytes_to_unicode
 
 VOCAB_PATH = FIXTURES_PATH / "gpt2_vocab.json"
 MERGES_PATH = FIXTURES_PATH / "gpt2_merges.txt"
@@ -412,7 +412,7 @@ def test_encode_iterable_tinystories_matches_tiktoken():
     assert tokenizer.decode(all_ids) == corpus_contents
     assert reference_tokenizer.decode(reference_ids) == corpus_contents
 
-
+from memory_profiler import profile
 @pytest.mark.skipif(
     not sys.platform.startswith("linux"),
     reason="rlimit support for non-linux systems is spotty.",
@@ -462,3 +462,9 @@ def _encode(tokenizer, text):
     for just this function. We set the memory limit to 1MB.
     """
     return tokenizer.encode(text)
+
+if __name__ == "__main__":
+    # test_ascii_string_matches_tiktoken()
+    # test_roundtrip_unicode_string_with_special_tokens()
+    # test_encode_memory_usage()
+    test_encode_iterable_memory_usage()

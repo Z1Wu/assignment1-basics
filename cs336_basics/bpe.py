@@ -16,6 +16,9 @@ logging.basicConfig(
 )
 
 DUMP_FILE_PREFIX = "pretoken_dump"
+PAT_PRE_TOKEN = re.compile(
+    r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+)
 
 
 class BPC:
@@ -87,7 +90,6 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
-
 def pretokenization_worker(
     start: int, end: int, file: str, outfile_path: str, re_split_token, re_pre_token
 ):
@@ -126,9 +128,6 @@ def pretokenization(
         # split special token，不保留分隔符
         PAT_SPLIT_SPEC_TOKEN = re.compile(
             "|".join([re.escape(e) for e in special_tokens])
-        )
-        PAT_PRE_TOKEN = re.compile(
-            r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
         )
         # create result dir if not exist
         Path(PRETOKEN_RESULT_DIR).mkdir(parents=True, exist_ok=True)
