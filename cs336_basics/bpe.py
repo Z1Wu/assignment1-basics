@@ -10,7 +10,10 @@ from sortedcontainers import SortedList
 import logging
 from functools import reduce
 
-logging.basicConfig(level=logging.WARN)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 DUMP_FILE_PREFIX = "pretoken_dump"
 
@@ -31,6 +34,9 @@ class BPC:
             isinstance(other, BPC) and self.bp == other.bp and self.count == other.count
         )
 
+def current_time_str_micro():
+    now = datetime.datetime.now()
+    return f'{now.strftime("%Y%m%d_%H%M%S")}_{now.microsecond:06d}'
 
 # borrow from cs336_basics/pretokenization_example.py
 def find_chunk_boundaries(
@@ -115,7 +121,7 @@ def pretokenization(
         PRETOKEN_RESULT_DIR = resume_dir
     else:
         # avoid different run file
-        PRETOKEN_RESULT_DIR = f'./data/token2count_debug/{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}_{datetime.datetime.now().microsecond:06d}'
+        PRETOKEN_RESULT_DIR = f'./data/token2count_debug/{current_time_str_micro()}'
         logging.info(f"Dump pretoken result into dir {PRETOKEN_RESULT_DIR}")
         # split special token，不保留分隔符
         PAT_SPLIT_SPEC_TOKEN = re.compile(
@@ -215,6 +221,7 @@ def _train_bpe(
         merged_bp = bytes_reduce(cur_bp)
         result.append(cur_bp)
         total_new_bp_counter: Counter[Tuple[bytes, ...]] = Counter()
+        logging.info(f"run step {i} with byte pair {cur_bp}")
         for tk in bp2token[cur_bp]:
             tokens_list = token2bytes_list[tk]
             tmp_tokens_list = []
@@ -270,9 +277,12 @@ def _train_bpe(
 
 
 def train_bpe(
-    input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]
-):
-    pre_token_counter = pretokenization(input_path, 8, special_tokens)
+    input_path: str | os.PathLike, 
+    vocab_size: int, 
+    special_tokens: list[str],
+    resume_pretoken_dir: str | None = None
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    pre_token_counter = pretokenization(input_path, 8, special_tokens, resume_pretoken_dir)
     bpe_res = _train_bpe(
         vocab_size - len(special_tokens) - 256, pre_token_counter=pre_token_counter
     )
@@ -315,7 +325,49 @@ def test_train_bpe_full():
     logging.warn(res)
 
 
+def train_bpe_tinystories():
+    # train 
+    train_file_path = "/home/wuziyi/code/cs336/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
+    special_tokens = ["<|endoftext|>"]
+    out_dir = f"./data/vocab_result/{current_time_str_micro()}"
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    (vocab, merges) = train_bpe(
+        train_file_path,
+        vocab_size=10000,
+        special_tokens=special_tokens,
+        resume_pretoken_dir = '/home/wuziyi/code/cs336/assignment1-basics/data/token2count_debug/20250928_181205_158537'
+    )
+    logging.info("dump result into out_dir")
+    with open(os.path.join(out_dir, 'vocab.pkl'), 'wb') as f :
+        pickle.dump(vocab, f)
+    with open(os.path.join(out_dir, 'merges.pkl'), 'wb') as f :
+        pickle.dump(merges, f)
+
+def visualize_report(vocab: dict[int, bytes], merges:  list[tuple[bytes, bytes]]):
+    # top 10 longest vocab 
+    top10_kvs = sorted(vocab.items(), key = lambda kvs: -len(kvs[1]))[:20]
+    for (k, v) in top10_kvs:
+        logging.info(f'id {k} : {v} with len {len(v)}')
+
+
+def show_bpe_result(vocab_dump_path: str, merges_dump_path: str):
+    with open(vocab_dump_path, 'rb') as fv, open(merges_dump_path, 'rb') as fm:
+        vocab = pickle.load(fv)
+        merges = pickle.load(fm)
+        visualize_report(vocab, merges)
+
+
 if __name__ == "__main__":
     # test_sorted_list()
     # test_train_bpe()
-    test_train_bpe_full()
+    # test_train_bpe_full()
+    # train_bpe_tinystories()
+    #
+    show_bpe_result(
+        vocab_dump_path="/home/wuziyi/code/cs336/assignment1-basics/data/vocab_result/20250928_184448_180765/vocab.pkl",
+        merges_dump_path="/home/wuziyi/code/cs336/assignment1-basics/data/vocab_result/20250928_184448_180765/vocab.pkl"
+    )
+
+
+
+
