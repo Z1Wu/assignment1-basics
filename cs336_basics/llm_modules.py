@@ -1,0 +1,233 @@
+import torch
+from torch.nn import Module, Parameter
+import math
+import einops
+from jaxtyping import Bool, Float, Int
+from torch import Tensor
+
+
+
+class Linear(Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        # weight initizalition
+        std = 2.0 / (in_features + out_features)
+        std_sqrt = math.sqrt(std)
+        self.weight: Parameter = Parameter(
+            torch.nn.init.trunc_normal_(
+                torch.empty((out_features, in_features), dtype=dtype, device=device),
+                mean=0,
+                std=std,
+                a=-3 * std_sqrt,
+                b=3 * std_sqrt,
+            )
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        #  Apply the linear transformation to the input
+        return x @ self.weight.T
+
+
+class Embedding(Module):
+    def __init__(
+        self,
+        num_embedding: int,
+        embedding_dim: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.embedding: Parameter = Parameter(
+            torch.nn.init.trunc_normal_(
+                torch.empty((num_embedding, embedding_dim), dtype=dtype, device=device),
+                mean=0,
+                std=1,
+                a=-3,
+                b=3,
+            )
+        )
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        # ... -> ..., embedding_dim
+        return torch.index_select(self.embedding, 0, token_ids.flatten()).view(
+            (*token_ids.shape, -1)
+        )
+
+
+class RMSNorm(Module):
+    def __init__(
+        self,
+        d_model: int,
+        eps: float = 1e-5,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.g: Parameter = Parameter(torch.ones(d_model, device=device, dtype=dtype))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # (batch_size, sequence_length, d_model)
+        in_type = x.dtype
+        x.to(torch.float32)
+
+        tg = einops.rearrange(self.g, "d_model -> 1 1 d_model")
+        mean_sum_sqare = torch.sqrt(torch.mean(x * x, -1, keepdim=True) + self.eps)
+        return (x * tg / mean_sum_sqare).to(in_type)
+
+
+class SwiGLU(Module):
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+
+        if d_ff == None:
+            d_ff = int(d_model * 8.0 / 3)
+            if d_ff % 64 != 0:
+                d_ff = (d_ff // 64 + 1) * 64
+
+        self.w1 = Linear(
+            in_features=d_model, out_features=d_ff, dtype=dtype, device=device
+        )
+
+        self.w2 = Linear(
+            in_features=d_ff, out_features=d_model, dtype=dtype, device=device
+        )
+
+        self.w3 = Linear(
+            in_features=d_model, out_features=d_ff, dtype=dtype, device=device
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # (batch_size, sequence_length, d_model)
+        x1 = self.w1(x)
+        x1 = x1 * torch.sigmoid(x1)
+        x2 = self.w3(x)
+        return self.w2(x1 * x2)
+
+
+class RoPE(Module):
+    def __init__(
+        self,
+        theta: float,
+        d_k: int,
+        max_seq_len: int,
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+        # diag
+        rope_mat = torch.empty(max_seq_len, d_k // 2, 2, 2, device=device)
+        for i in range(max_seq_len):
+            for k in range(1, d_k // 2 + 1):
+                theta_k = i / theta ** ((2 * k - 2) / d_k)
+                rope_mat[i][k - 1] = torch.tensor(
+                    [
+                        [math.cos(theta_k), -math.sin(theta_k)],
+                        [math.sin(theta_k), math.cos(theta_k)],
+                    ],
+                    device=device,
+                )
+        self.register_buffer("rope_mat", rope_mat)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        rope_mat = self.get_buffer("rope_mat").index_select(0, token_positions)
+        x = einops.rearrange(x, "... seq_len (d_k_2 bs) -> ... seq_len d_k_2 bs", bs=2)
+        y = einops.einsum(
+            x,
+            rope_mat,
+            "... seq_len d_k_2 bs, seq_len d_k_2 rt bs -> ... seq_len d_k_2 rt",
+        )
+        return einops.rearrange(y, "... seq_len d_k_2 bs -> ... seq_len (d_k_2 bs)")
+
+
+
+def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
+    x = torch.exp(x - torch.max(x, dim=dim, keepdim=True).values)
+    sum_x = torch.sum(x, dim=dim, keepdim=True)
+    return x / sum_x
+
+
+def scaled_dot_product_attention(
+        Q: Float[Tensor, " ... queries d_k"],
+        K: Float[Tensor, " ... keys d_k"],
+        V: Float[Tensor, " ... values d_v"],
+        mask: Bool[Tensor, " ... queries keys"] | None = None,) -> Float[Tensor, " ... queries d_v"]:
+    d_k = Q.shape[-1]
+    dot_product_mat = einops.einsum(
+        Q, K,
+        "... queries d_k, ... keys d_k -> ... queries keys" 
+    ) / math.sqrt(d_k)
+    if mask != None:
+        dot_product_mat[~mask] = -float('inf')
+    prob_mat = softmax(dot_product_mat, dim = -1)
+    res = einops.einsum(
+        prob_mat, V,
+        "... queries key_num, ... key_num d_v -> ... queries d_v"
+    )
+    return res
+
+
+def test_linear():
+    linear = Linear(in_features=10, out_features=20)
+    empty_tensor = torch.empty((20, 10))
+    linear.load_state_dict({"weight": empty_tensor})
+    assert torch.all(linear.weight == empty_tensor)
+    out = linear.forward(torch.rand(10, 10))
+    assert out.shape == (10, 20), f"invalid {out.shape}"
+
+
+def test_RMS():
+    d_model = 10
+    rms_norm = RMSNorm(d_model=d_model)
+    target_shape = (2, 2, d_model)
+    assert rms_norm.forward(torch.zeros(*target_shape)).shape == target_shape
+
+
+def test_SwiGLU():
+    d_model = 10
+    swiglu = SwiGLU(d_model=d_model)
+    state_dict = swiglu.state_dict()
+    assert state_dict != None
+
+
+def test_Rope():
+    d_k = 10
+    max_len = 10
+    batch = 5
+    seq_num = 5
+    rope = RoPE(0.1, max_len, d_k)
+    # b, s, d
+    in_feat = torch.rand(batch, seq_num, d_k)
+    tk_pos = torch.range(0, seq_num - 1, dtype=torch.int32)
+    out = rope.forward(in_feat, tk_pos)
+    assert out.shape == (batch, seq_num, d_k)
+
+def test_sdpa():
+    n = 10
+    m = 5
+    dk = 5
+    dv = 5
+    Q = torch.ones(n, dk)
+    K = torch.ones(m, dk)
+    V = torch.ones(m, dv)
+    out = scaled_dot_product_attention(Q, K, V)
+    assert out != None
+
+
+if __name__ == "__main__":
+    # test_linear()
+    # test_RMS()
+    # test_SwiGLU()
+    # test_Rope()
+    test_sdpa()
