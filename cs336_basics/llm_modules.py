@@ -6,6 +6,30 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 
+def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
+    x = torch.exp(x - torch.max(x, dim=dim, keepdim=True).values)
+    sum_x = torch.sum(x, dim=dim, keepdim=True)
+    return x / sum_x
+
+
+def scaled_dot_product_attention(
+        Q: Float[Tensor, " ... queries d_k"],
+        K: Float[Tensor, " ... keys d_k"],
+        V: Float[Tensor, " ... values d_v"],
+        mask: Bool[Tensor, " ... queries keys"] | None = None,) -> Float[Tensor, " ... queries d_v"]:
+    d_k = Q.shape[-1]
+    dot_product_mat = einops.einsum(
+        Q, K,
+        "... queries d_k, ... keys d_k -> ... queries keys" 
+    ) / math.sqrt(d_k)
+    if mask != None:
+        dot_product_mat[~mask] = -float('inf')
+    prob_mat = softmax(dot_product_mat, dim = -1)
+    res = einops.einsum(
+        prob_mat, V,
+        "... queries key_num, ... key_num d_v -> ... queries d_v"
+    )
+    return res
 
 class Linear(Module):
     def __init__(
@@ -69,7 +93,7 @@ class RMSNorm(Module):
         dtype: torch.dtype | None = None,
     ):
         super().__init__()
-        self.g: Parameter = Parameter(torch.ones(d_model, device=device, dtype=dtype))
+        self.weight: Parameter = Parameter(torch.ones(d_model, device=device, dtype=dtype))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -77,7 +101,7 @@ class RMSNorm(Module):
         in_type = x.dtype
         x.to(torch.float32)
 
-        tg = einops.rearrange(self.g, "d_model -> 1 1 d_model")
+        tg = einops.rearrange(self.weight, "d_model -> 1 1 d_model")
         mean_sum_sqare = torch.sqrt(torch.mean(x * x, -1, keepdim=True) + self.eps)
         return (x * tg / mean_sum_sqare).to(in_type)
 
@@ -141,42 +165,111 @@ class RoPE(Module):
         self.register_buffer("rope_mat", rope_mat)
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
-        rope_mat = self.get_buffer("rope_mat").index_select(0, token_positions)
+        # token_positions -> ... seq 
+        rope_mat = self.get_buffer("rope_mat")[token_positions]
         x = einops.rearrange(x, "... seq_len (d_k_2 bs) -> ... seq_len d_k_2 bs", bs=2)
         y = einops.einsum(
             x,
             rope_mat,
-            "... seq_len d_k_2 bs, seq_len d_k_2 rt bs -> ... seq_len d_k_2 rt",
+            "... seq_len d_k_2 bs, ... seq_len d_k_2 rt bs -> ... seq_len d_k_2 rt",
         )
         return einops.rearrange(y, "... seq_len d_k_2 bs -> ... seq_len (d_k_2 bs)")
 
+class MultiHeadSelfAttention(Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        rope_module: Module | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None
+    ):
+        super().__init__()
+        self.d_k = d_model // num_heads
+        self.d_v = d_model // num_heads
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.q_proj = Linear(
+            in_features=d_model, out_features=self.d_k * self.num_heads, dtype=dtype, device=device)
+        self.k_proj = Linear(
+            in_features=d_model, out_features=self.d_k * self.num_heads, dtype=dtype, device=device)
+        self.v_proj = Linear(
+            in_features=d_model, out_features=self.d_v * self.num_heads, dtype=dtype, device=device)
+        self.output_proj = Linear(
+            in_features=self.d_v * self.num_heads, out_features=d_model, dtype=dtype, device=device)
+        self.rope = rope_module
 
+    
+    def forward(self, x: torch.Tensor, token_positions:torch.Tensor | None = None) -> torch.Tensor:
+        seq_len = x.shape[-2]
+        Q = einops.rearrange(
+            self.q_proj(x), "... seq (h dk) -> ... h seq dk", h = self.num_heads
+        )
+        K = einops.rearrange(
+            self.k_proj(x), "... seq (h dk) -> ... h seq dk", h = self.num_heads
+        )
+        prev_batches_before_seq = len(Q.shape) - 2
+        if self.rope != None:
+            if token_positions == None:
+                token_positions = torch.arange(0, seq_len).view(*([1] * prev_batches_before_seq), seq_len)
+            Q = self.rope(Q, token_positions)
+            K = self.rope(K, token_positions)
 
-def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
-    x = torch.exp(x - torch.max(x, dim=dim, keepdim=True).values)
-    sum_x = torch.sum(x, dim=dim, keepdim=True)
-    return x / sum_x
+        V = einops.rearrange(
+            self.v_proj(x), "... seq (h dv) -> ... h seq dv", h = self.num_heads
+        )
+        mask = torch.tril(torch.ones(Q.shape[:-2] + (seq_len, seq_len), dtype=torch.bool))
+        out = einops.rearrange(
+            scaled_dot_product_attention(Q, K, V, mask),
+            "... h seq dv -> ... seq (h dv)"
+        )
+        return self.output_proj(out)
+ 
 
+class TransformerBlock(Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int | None = None,
+        rope_module: Module | None = None,
+        eps: float = 1e-5,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None
+    ):
+        super().__init__()
+        self.attn = MultiHeadSelfAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            rope_module=rope_module,
+            device=device,
+            dtype=dtype
+        )
+        self.ffn = SwiGLU(
+            d_model= d_model,
+            d_ff=d_ff,
+            device=device,
+            dtype=dtype
+        )
+        self.ln1 = RMSNorm(
+            d_model=d_model,
+            eps=eps,
+            device=device,
+            dtype=dtype
+        )
+        self.ln2 = RMSNorm(
+            d_model=d_model,
+            eps=eps,
+            device=device,
+            dtype=dtype
+        )
+    
+    def forward(self, x: torch.Tensor, token_positions:torch.Tensor | None = None) -> torch.Tensor:
+        x = x + self.attn(self.ln1(x), token_positions)
+        return x + self.ffn(self.ln2(x))
 
-def scaled_dot_product_attention(
-        Q: Float[Tensor, " ... queries d_k"],
-        K: Float[Tensor, " ... keys d_k"],
-        V: Float[Tensor, " ... values d_v"],
-        mask: Bool[Tensor, " ... queries keys"] | None = None,) -> Float[Tensor, " ... queries d_v"]:
-    d_k = Q.shape[-1]
-    dot_product_mat = einops.einsum(
-        Q, K,
-        "... queries d_k, ... keys d_k -> ... queries keys" 
-    ) / math.sqrt(d_k)
-    if mask != None:
-        dot_product_mat[~mask] = -float('inf')
-    prob_mat = softmax(dot_product_mat, dim = -1)
-    res = einops.einsum(
-        prob_mat, V,
-        "... queries key_num, ... key_num d_v -> ... queries d_v"
-    )
-    return res
-
+class TransformerBlock(Module):
+    pass
 
 def test_linear():
     linear = Linear(in_features=10, out_features=20)
@@ -224,10 +317,58 @@ def test_sdpa():
     out = scaled_dot_product_attention(Q, K, V)
     assert out != None
 
+def test_MultiHeadSelfAttention():
+    max_len = 10
+    num_heads = 4
+    d_model = 16
+    seq_len = 2
+    batch = 1
+    d_k = d_model //  num_heads
+    rope = RoPE(
+        0.1, 
+        d_k=d_k,
+        max_seq_len=max_len
+    )
+    mha = MultiHeadSelfAttention(d_model, num_heads, rope)
+    mha.q_proj.weight.data = torch.eye(d_model)
+    mha.k_proj.weight.data = torch.eye(d_model)
+    mha.v_proj.weight.data = torch.eye(d_model)
+    mha.output_proj.weight.data = torch.eye(d_model)
+
+    token_positions = torch.arange(0, seq_len)
+    input = torch.ones(batch, seq_len, d_model)
+    out = mha.forward(input, None)
+    assert out != None
+
+def test_tb():
+    batch = 1
+    d_model = 16
+    num_heads = 4
+    max_len = 10
+    seq_len = 2
+    d_k = d_model //  num_heads
+    rope = RoPE(
+        0.1, 
+        d_k=d_k,
+        max_seq_len=max_len
+    )
+    input = torch.ones(batch, seq_len, d_model)
+    tb = TransformerBlock(
+        d_model=d_model,
+        num_heads=num_heads,
+        rope_module=rope
+    )
+    out = tb.forward(input)
+    assert out != None
+
+
 
 if __name__ == "__main__":
     # test_linear()
     # test_RMS()
     # test_SwiGLU()
     # test_Rope()
-    test_sdpa()
+    # test_sdpa()
+    # test_MultiHeadSelfAttention()
+    test_tb()
+
