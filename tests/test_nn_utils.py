@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
 
-from .adapters import run_cross_entropy, run_gradient_clipping, run_softmax
+from tests.adapters import run_cross_entropy, run_gradient_clipping, run_softmax
 
 
 def test_softmax_matches_pytorch():
@@ -87,3 +87,6 @@ def test_gradient_clipping():
             t1_c_grad.detach().numpy(),
             atol=1e-6,
         )
+
+if __name__ == "__main__":
+    test_gradient_clipping()

@@ -4,12 +4,21 @@ import math
 import einops
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+from typing import Optional, Callable, Iterable
+
 
 
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
     x = torch.exp(x - torch.max(x, dim=dim, keepdim=True).values)
     sum_x = torch.sum(x, dim=dim, keepdim=True)
     return x / sum_x
+
+def cross_entropy_loss(logits: Float[Tensor, " batch_size vocab_size"], y: Float[Tensor, " batch_size "]) -> torch.Tensor: 
+    logits = logits - torch.max(logits, dim=-1, keepdim=True).values
+    sum_logits = torch.sum(torch.exp(logits), dim=-1, keepdim=True)
+    y = einops.rearrange(y, '... batch_size -> ... batch_size 1')
+    y_logits = torch.gather(logits, 1, y)
+    return torch.mean(torch.log(sum_logits) - y_logits)
 
 
 def scaled_dot_product_attention(
@@ -305,6 +314,80 @@ class Transformer(Module):
         x = self.lm_head(x)
         return x
 
+
+class AdamW(torch.optim.Optimizer):
+    def __init__(self, params, 
+                 lr=1e-3, 
+                weight_decay=0.01,
+                betas=(0.9, 0.999),
+                eps=1e-8):
+        defaults = {
+            "lr": lr, 
+            "beta1": betas[0], 
+            "beta2": betas[1], 
+            "weight_decay": weight_decay,
+            "eps": eps
+        }
+        super().__init__(params, defaults=defaults)
+
+    def step(self, closure: Optional[Callable] = None):
+        loss = closure() if closure is not None else 0
+        for pg in self.param_groups:
+            lr = pg["lr"] 
+            beta1 = pg["beta1"] 
+            beta2 = pg["beta2"] 
+            weight_decay = pg["weight_decay"]
+            eps = pg["eps"]
+            for p in pg["params"]:
+                if p.grad is None:
+                    continue
+                state = self.state[p]
+                # iteration number
+                t = state.get("t", 1)
+                grad = p.grad.data
+                m = state.get("m", torch.zeros(p.data.shape, requires_grad=False, device=p.data.device, dtype=p.data.dtype))
+                v = state.get("v", torch.zeros(p.data.shape, requires_grad=False, device=p.data.device, dtype=p.data.dtype))
+                m = beta1 * m + (1 - beta1) * grad
+                v = beta2 * v + (1 - beta2) * grad * grad
+                lr_t = lr * math.sqrt(1 - beta2 ** t) / (1 - beta1 ** t)
+                p.data -= lr_t * m / (torch.sqrt(v) + eps)
+                p.data -= lr * weight_decay * p.data
+                state["t"] = t + 1
+                state["m"] = m
+                state["v"] = v
+
+
+def cosine_annealing(
+        it: int,
+        max_learning_rate: float,
+        min_learning_rate: float,
+        warmup_iters: int,
+        cosine_cycle_iters: int,
+    ):
+        if it < warmup_iters:
+            return max_learning_rate * it / warmup_iters
+        elif it <= cosine_cycle_iters:
+            t = (it - warmup_iters) / (cosine_cycle_iters - warmup_iters) * math.pi
+            return min_learning_rate + 0.5 * (1 + math.cos(t)) * (max_learning_rate - min_learning_rate)
+        else:
+            return min_learning_rate
+
+def gradient_cilpping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float):
+    eps = 1e-6
+    square_sum = 0
+    for p in parameters:
+        if p.grad != None:
+            # l2_norm = torch.sqrt(p.grad * p.grad)
+            # scale_down = torch.ones(p.grad.shape) * max_l2_norm / (l2_norm + eps)
+            # scale_down[l2_norm < max_l2_norm] = 1
+            # p.grad = p.grad * scale_down
+            square_sum += torch.sum(p.grad * p.grad)
+    l2_norm = math.sqrt(square_sum)
+    if square_sum > max_l2_norm:
+        for p in parameters:
+            if p.grad != None:
+                p.grad = p.grad * max_l2_norm / (l2_norm + eps)
+
 def test_linear():
     linear = Linear(in_features=10, out_features=20)
     empty_tensor = torch.empty((20, 10))
@@ -395,16 +478,25 @@ def test_tb():
     out = tb.forward(input)
     assert out != None
 
+def test_sgd():
+    from torch.optim.sgd import SGD
+    for lr in [1, 10, 100]:
+        weights = torch.nn.Parameter(5 * torch.randn((10, 10)))
+        opt = SGD([weights], lr=lr)
+        print(f'{"=" * 10 }run with learning {lr}')
+        for t in range(100):
+            opt.zero_grad() # Reset the gradients for all learnable parameters.
+            loss = (weights**2).mean() # Compute a scalar loss value.
+            print(loss.cpu().item())
+            loss.backward() # Run backward pass, which computes gradients.
+            opt.step() # Run optimizer step.
 
-def test_transformer():
-    d_model = 16
-    num_heads = 4
-    max_len = 10
-    batch = 1
-    seq_len = 2
-    num_layers = 1
-
-    pass
+def test_gc():
+    t = torch.nn.Parameter(torch.randn(5,5))
+    loss_c = t.sum()
+    loss_c.backward()
+    gradient_cilpping([t], 0.2)
+    
 
 if __name__ == "__main__":
     # test_linear()
@@ -413,5 +505,8 @@ if __name__ == "__main__":
     # test_Rope()
     # test_sdpa()
     # test_MultiHeadSelfAttention()
-    test_tb()
+    # test_tb()
+    # test_sgd()
+    test_gc()
+
 
