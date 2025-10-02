@@ -1,5 +1,5 @@
 import torch
-from torch.nn import Module, Parameter
+from torch.nn import Module, Parameter, ModuleList
 import math
 import einops
 from jaxtyping import Bool, Float, Int
@@ -67,7 +67,7 @@ class Embedding(Module):
         dtype: torch.dtype | None = None,
     ):
         super().__init__()
-        self.embedding: Parameter = Parameter(
+        self.weight: Parameter = Parameter(
             torch.nn.init.trunc_normal_(
                 torch.empty((num_embedding, embedding_dim), dtype=dtype, device=device),
                 mean=0,
@@ -79,7 +79,7 @@ class Embedding(Module):
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         # ... -> ..., embedding_dim
-        return torch.index_select(self.embedding, 0, token_ids.flatten()).view(
+        return torch.index_select(self.weight, 0, token_ids.flatten()).view(
             (*token_ids.shape, -1)
         )
 
@@ -268,8 +268,42 @@ class TransformerBlock(Module):
         x = x + self.attn(self.ln1(x), token_positions)
         return x + self.ffn(self.ln2(x))
 
-class TransformerBlock(Module):
-    pass
+class Transformer(Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        rope_theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None
+    ): 
+        super().__init__()
+        self.token_embeddings = Embedding(num_embedding=vocab_size, embedding_dim=d_model, device=device, dtype=dtype)
+        rope = RoPE(theta=rope_theta, d_k= d_model // num_heads, max_seq_len=context_length)
+        self.layers = ModuleList(
+            [TransformerBlock(
+                d_model=d_model,
+                num_heads=num_heads,
+                d_ff=d_ff,
+                rope_module=rope,
+                device = None,
+                dtype = None
+            ) for _ in range(num_layers)]
+        )
+        self.ln_final = RMSNorm(d_model)
+        self.lm_head = Linear(in_features=d_model, out_features=vocab_size)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.token_embeddings(x)
+        for layer in self.layers:
+            x = layer(x)
+        x = self.ln_final(x)
+        x = self.lm_head(x)
+        return x
 
 def test_linear():
     linear = Linear(in_features=10, out_features=20)
@@ -362,6 +396,15 @@ def test_tb():
     assert out != None
 
 
+def test_transformer():
+    d_model = 16
+    num_heads = 4
+    max_len = 10
+    batch = 1
+    seq_len = 2
+    num_layers = 1
+
+    pass
 
 if __name__ == "__main__":
     # test_linear()
