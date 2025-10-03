@@ -20,6 +20,7 @@ random.seed(0)
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
+
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
     x = torch.exp(x - torch.max(x, dim=dim, keepdim=True).values)
     sum_x = torch.sum(x, dim=dim, keepdim=True)
@@ -572,8 +573,8 @@ class Trainer:
         )
         self.train_dataset_path = train_dataset_path
         self.validate_dataset_path = validate_dataset_path
-        self.train_dataset = np.load(file=train_dataset_path, mmap_mode='r')
-        self.validate_dataset = np.load(file=validate_dataset_path, mmap_mode='r')
+        self.train_dataset = np.load(file=train_dataset_path, mmap_mode="r")
+        self.validate_dataset = np.load(file=validate_dataset_path, mmap_mode="r")
         self.max_iter = max_iter
         self.start_iter = 0
         self.ckpt_out_dir = ckpt_out_dir
@@ -590,10 +591,8 @@ class Trainer:
             logger = logging.getLogger()
             logging.basicConfig(
                 level=logging.INFO,
-                format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
-                handlers=[
-                    logging.StreamHandler()
-                ]
+                format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                handlers=[logging.StreamHandler()],
             )
         return Trainer(logger=logger, **config)
 
@@ -623,7 +622,7 @@ class Trainer:
             # ckpt config
             "ckpt_out_dir": self.ckpt_out_dir,
         }
-    
+
     def validate(self):
         validate_batches_num = len(self.validate_dataset) // 10
         with torch.no_grad():
@@ -634,65 +633,73 @@ class Trainer:
                     dataset=self.validate_dataset,
                     batch_size=self.batch_size,
                     context_length=self.context_length,
-                    device=self.device
+                    device=self.device,
                 )
                 out = self.model(x)
                 loss = cross_entropy_loss(
-                    einops.rearrange(out, "... batch seq vocab -> ... (batch seq) vocab"),
+                    einops.rearrange(
+                        out, "... batch seq vocab -> ... (batch seq) vocab"
+                    ),
                     einops.rearrange(y, "... batch seq -> ... (batch seq)"),
                 )
                 self.logger.info(
-                    f'[Validate :{i + 1} / {validate_batches_num}]: {{loss : {loss}, batch_num: {self.batch_size}}}'
+                    f"[Validate :{i + 1} / {validate_batches_num}]: {{loss : {loss}, batch_num: {self.batch_size}}}"
                 )
                 total_loss += loss
             return total_loss / validate_batches_num
         pass
 
     def train(self):
-        self.logger.info(f'Start training from iteration : {self.start_iter + 1} '+ 
-                         f'with config : \n ${json.dumps(self.dump_config(), indent=2)}')
+        self.logger.info(
+            f"Start training from iteration : {self.start_iter + 1} "
+            + f"with config : \n ${json.dumps(self.dump_config(), indent=2)}"
+        )
         cur_lr = self.lr
         for cur_iter in range(self.start_iter + 1, self.max_iter + 1):
-            LOG_PREFIX = f'[{cur_iter} / {self.max_iter}]:'
-            self.logger.info(f'{LOG_PREFIX} Getting batch with size {self.batch_size}')
+            LOG_PREFIX = f"[{cur_iter} / {self.max_iter}]:"
+            self.logger.info(f"{LOG_PREFIX} Getting batch with size {self.batch_size}")
             x, y = get_batch(
                 dataset=self.train_dataset,
                 batch_size=self.batch_size,
                 context_length=self.context_length,
-                device=self.device
+                device=self.device,
             )
             # batch seq vocab
-            self.logger.info(f'{LOG_PREFIX} Model Fowarding ...')
+            self.logger.info(f"{LOG_PREFIX} Model Fowarding ...")
             self.model.train()
             out = self.model(x)
             loss = cross_entropy_loss(
                 einops.rearrange(out, "... batch seq vocab -> ... (batch seq) vocab"),
                 einops.rearrange(y, "... batch seq -> ... (batch seq)"),
             )
-            self.logger.info(f'{LOG_PREFIX} Model Backwarding ...')
+            self.logger.info(f"{LOG_PREFIX} Model Backwarding ...")
             self.optmizer.zero_grad()
             loss.backward()
             if self.max_l2_norm != None:
                 gradient_cilpping(self.model.parameters(), self.max_l2_norm)
-            self.logger.info(f'{LOG_PREFIX} Optimizer Updating ...')
+            self.logger.info(f"{LOG_PREFIX} Optimizer Updating ...")
             self.optmizer.step()
             if self.lr_scheduler_config != None:
-                if self.lr_scheduler_config['name'] == 'cosine':
+                if self.lr_scheduler_config["name"] == "cosine":
                     cur_lr = cosine_annealing(
                         cur_iter,
-                        max_learning_rate=self.lr_scheduler_config['max_learning_rate'],
-                        min_learning_rate=self.lr_scheduler_config['min_learning_rate'],
-                        warmup_iters=self.lr_scheduler_config['warmup_iters'],
-                        cosine_cycle_iters=self.lr_scheduler_config['cosine_cycle_iters']
+                        max_learning_rate=self.lr_scheduler_config["max_learning_rate"],
+                        min_learning_rate=self.lr_scheduler_config["min_learning_rate"],
+                        warmup_iters=self.lr_scheduler_config["warmup_iters"],
+                        cosine_cycle_iters=self.lr_scheduler_config[
+                            "cosine_cycle_iters"
+                        ],
                     )
                     for pg in self.optmizer.param_groups:
-                        pg['lr'] = cur_lr
+                        pg["lr"] = cur_lr
                 else:
-                    raise ValueError('Invalid lr schduler name')
-            self.logger.info(f'{LOG_PREFIX} {{loss : {loss}, lr: {cur_lr}}}')
+                    raise ValueError("Invalid lr schduler name")
+            self.logger.info(f"{LOG_PREFIX} {{loss : {loss}, lr: {cur_lr}}}")
             if self.ckpt_out_dir != None and cur_iter % self.ckpt_interval == 0:
                 validate_loss = self.validate()
-                self.logger.info(f'{LOG_PREFIX} {{validate_loss : {validate_loss}, iter: {cur_iter}}}')
+                self.logger.info(
+                    f"{LOG_PREFIX} {{validate_loss : {validate_loss}, iter: {cur_iter}}}"
+                )
                 out_ckpt_path = os.path.join(self.ckpt_out_dir, f"ckpt-{cur_iter}.dump")
                 with open(out_ckpt_path, "wb") as f:
                     self.logger.info(
@@ -702,13 +709,13 @@ class Trainer:
                         model=self.model,
                         optimizer=self.optmizer,
                         iteration=cur_iter,
-                        out=f
+                        out=f,
                     )
         # save final model
         if self.ckpt_out_dir != None:
             final_model_path = os.path.join(self.ckpt_out_dir, "ckpt-final.dump")
             with open(final_model_path, "wb") as f:
-                self.logger.info(f'Saving final model into {final_model_path} ...')
+                self.logger.info(f"Saving final model into {final_model_path} ...")
                 save_checkpoint(
                     model=self.model,
                     optimizer=self.optmizer,
@@ -718,32 +725,30 @@ class Trainer:
 
 
 class Decoder:
-    def __init__(self, 
-                 model: Module,
-                 tokenizer :Tokenizer,
-                 device: str = 'cpu'
-                 ) -> None:
+    def __init__(
+        self, model: Module, tokenizer: Tokenizer, device: str = "cpu"
+    ) -> None:
         self.model = model
-        self.tokenizer:Tokenizer = tokenizer
+        self.tokenizer: Tokenizer = tokenizer
         self.device = device
         self.end_token = 1
-    
+
     def decode(self, prompt: str, max_output_len: int, tempeature: float, top_p: int):
         input_tensor = einops.rearrange(
-                torch.tensor(
-                self.tokenizer.encode(
-                    prompt
-                ),
+            torch.tensor(
+                self.tokenizer.encode(prompt),
                 dtype=torch.int64,
-                device=torch.device(self.device)
-            ), 'seq -> 1 seq')
+                device=torch.device(self.device),
+            ),
+            "seq -> 1 seq",
+        )
         prompt_token_len = input_tensor.shape[-1]
         for _ in range(max_output_len):
             # batch, seq, vocab
             out = self.model(input_tensor)
             # [vocab,]
             logits = out[0][-1] / tempeature
-            prob = softmax(logits, dim = -1)
+            prob = softmax(logits, dim=-1)
             prob_list = prob.flatten().tolist()
             top_p_val = sorted(prob_list)[-top_p]
             prob[prob < top_p_val] = 0
@@ -752,12 +757,13 @@ class Decoder:
             if next_token[0].detach().cpu() == self.end_token:
                 break
             input_tensor = torch.cat(
-                [input_tensor, 
-                 einops.rearrange(next_token,'... seq -> ... 1 seq')
-                ],
-                dim = 1
+                [input_tensor, einops.rearrange(next_token, "... seq -> ... 1 seq")],
+                dim=1,
             )
-        return self.tokenizer.decode(input_tensor[0][prompt_token_len:].cpu().detach().tolist())
+        return self.tokenizer.decode(
+            input_tensor[0][prompt_token_len:].cpu().detach().tolist()
+        )
+
 
 def test_linear():
     linear = Linear(in_features=10, out_features=20)
@@ -864,17 +870,14 @@ def test_gc():
 
 
 def test_training_loop():
-    output_dir = './data/train_debug'
-    dataset_path = os.path.join(output_dir, 'tiny_debug_dataset.npy')
+    output_dir = "./data/train_debug"
+    dataset_path = os.path.join(output_dir, "tiny_debug_dataset.npy")
     if os.path.exists(dataset_path):
         # remove existing numpy file
         os.remove(dataset_path)
-    with open(dataset_path, 'wb') as f:
+    with open(dataset_path, "wb") as f:
         test_arr = np.arange(0, 100, dtype=np.int64)
-        np.save(
-            f,
-            test_arr
-        )
+        np.save(f, test_arr)
     train_config = {
         "vocab_size": 100,
         "context_length": 20,
@@ -896,11 +899,11 @@ def test_training_loop():
         "max_l2_norm": None,
         # lr scheduler
         "lr_scheduler_config": {
-            'name': 'cosine',
-            'max_learning_rate': 1e-2,
-            'min_learning_rate': 1e-3,
-            'warmup_iters': 10,
-            'cosine_cycle_iters': 60,
+            "name": "cosine",
+            "max_learning_rate": 1e-2,
+            "min_learning_rate": 1e-3,
+            "warmup_iters": 10,
+            "cosine_cycle_iters": 60,
         },
         # ckpt config
         "ckpt_out_dir": output_dir,
@@ -908,18 +911,18 @@ def test_training_loop():
     trainer = Trainer.from_config(train_config)
     trainer.train()
 
+
 def test_decoder():
     import pickle
-    tokenizer_result_dir = '/home/wuziyi/code/cs336/assignment1-basics/data/vocab_result/20250928_184448_180765'
+
+    tokenizer_result_dir = "/home/wuziyi/code/cs336/assignment1-basics/data/vocab_result/20250928_184448_180765"
     vocab_dump_path = os.path.join(tokenizer_result_dir, "vocab.pkl")
     merges_dump_path = os.path.join(tokenizer_result_dir, "merges.pkl")
-    
-    with open(vocab_dump_path, 'rb') as fv, open(merges_dump_path, 'rb') as fm:
+
+    with open(vocab_dump_path, "rb") as fv, open(merges_dump_path, "rb") as fm:
         vocab = pickle.load(fv)
         merges = pickle.load(fm)
-        tokenizer = Tokenizer(
-            vocab, merges, ['<|endoftext|>']
-        )
+        tokenizer = Tokenizer(vocab, merges, ["<|endoftext|>"])
         vocab_size = len(vocab)
         context_length = 100
         d_model = 128
@@ -935,16 +938,11 @@ def test_decoder():
             num_heads=num_heads,
             d_ff=d_ff,
             rope_theta=rope_theta,
-            device=torch.device("cpu")
+            device=torch.device("cpu"),
         )
         model.eval()
         test_decoder = Decoder(model, tokenizer=tokenizer)
-        print(test_decoder.decode(
-            "Hello",
-            10,
-            10,
-            2
-        ))
+        print(test_decoder.decode("Hello", 10, 10, 2))
 
 
 if __name__ == "__main__":
