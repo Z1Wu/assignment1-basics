@@ -348,6 +348,13 @@ def visualize_report(vocab: dict[int, bytes], merges:  list[tuple[bytes, bytes]]
     for (k, v) in top10_kvs:
         logging.info(f'id {k} : {v} with len {len(v)}')
 
+def encode_tiny_story():
+    # using trained encode
+    train_file_path = "/home/wuziyi/code/cs336/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
+    special_tokens = ["<|endoftext|>"]
+    # with open():
+        
+    pass
 
 def show_bpe_result(vocab_dump_path: str, merges_dump_path: str):
     with open(vocab_dump_path, 'rb') as fv, open(merges_dump_path, 'rb') as fm:
